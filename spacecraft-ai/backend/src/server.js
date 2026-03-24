@@ -13,7 +13,7 @@ import projectRoutes from './routes/projectRoutes.js';
 import analysisRoutes from './routes/analysisRoutes.js';
 import imageRoutes from './routes/imageRoutes.js';
 import upload from './middleware/uploadMiddleware.js';
-import { generateRoomImage, generateImageFromCloudinary } from './controllers/imageController.js';
+import { generateImage, generateImageFromCloudinary } from './controllers/imageController.js';
 
 dotenv.config();
 
@@ -50,7 +50,7 @@ app.use('/api/plans', planRoutes);
 app.use('/api/projects', projectRoutes);
 app.use('/api/analysis', analysisRoutes);
 app.use('/api/images', imageRoutes);
-app.post('/api/generate-image', upload.single('roomImage'), generateRoomImage);
+app.post('/api/generate-image', generateImage);
 app.get('/api/generate-image', generateImageFromCloudinary);
 
 // Error handling middleware

@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#111c31"/>
+      <stop offset="100%" stop-color="#291847"/>
+    </linearGradient>
+  </defs>
+  <rect width="1280" height="720" fill="url(#bg)"/>
+  <rect x="70" y="70" width="1140" height="580" rx="28" fill="#111827" opacity="0.7"/>
+  <text x="120" y="170" font-size="52" font-family="Arial" fill="#c8d8ff" font-weight="700">Gaming Bedroom Concept</text>
+  <text x="120" y="235" font-size="30" font-family="Arial" fill="#aab8dd">RGB zones, compact desk setup, acoustic + storage balance</text>
+  <rect x="120" y="360" width="460" height="160" rx="16" fill="#2a3558"/>
+  <rect x="620" y="340" width="290" height="200" rx="18" fill="#3a2d62"/>
+  <rect x="940" y="300" width="180" height="230" rx="14" fill="#1f2b48"/>
+  <circle cx="1020" cy="210" r="68" fill="#6e63ff" opacity="0.35"/>
+  <circle cx="925" cy="265" r="45" fill="#2dd4bf" opacity="0.3"/>
+</svg>

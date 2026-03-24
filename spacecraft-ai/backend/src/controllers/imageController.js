@@ -7,11 +7,14 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { v4 as uuidv4 } from 'uuid';
-import Replicate from 'replicate';
+import axios from 'axios';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const uploadDir = path.join(__dirname, '../../uploads');
+const POLLINATIONS_BASE = 'https://gen.pollinations.ai/image';
+const DEFAULT_HUGGINGFACE_MODEL = 'stabilityai/stable-diffusion-xl-base-1.0';
+const HUGGINGFACE_API_BASE = 'https://router.huggingface.co/hf-inference/models';
 
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
@@ -19,22 +22,208 @@ if (!fs.existsSync(uploadDir)) {
 
 // Store uploaded images metadata (in production, use database)
 const uploadedImages = new Map();
-let replicateClient = null;
 const DEFAULT_CLOUDINARY_IMAGE_URL = 'https://res.cloudinary.com/dfja0xdwr/image/upload/v1774272851/WhatsApp_Image_2026-03-23_at_14.47.59_nlilbe.jpg';
-const DEFAULT_SDXL_VERSION = '7762fd07cf82c948538e41f63f77d685e02b063e37e496e96eefd46c929f9bdc';
 
-function getReplicateClient() {
-  const token = process.env.REPLICATE_API_TOKEN;
+function getHuggingFaceToken() {
+  const token = process.env.HUGGINGFACE_API_KEY || process.env.HF_TOKEN;
 
   if (!token) {
-    throw new Error('Replicate API token not configured. Set REPLICATE_API_TOKEN in backend/.env');
+    throw new Error('Hugging Face API token is not configured. Set HUGGINGFACE_API_KEY in backend/.env');
   }
 
-  if (!replicateClient) {
-    replicateClient = new Replicate({ auth: token });
+  return token;
+}
+
+function buildPollinationsPrompt(userInput, context = {}) {
+  const roomType = context.roomType || 'bedroom';
+  const style = context.style || 'modern';
+  const mood = context.mood || 'cozy';
+  const budget = context.budget || 'medium';
+
+  const baseInput = String(userInput || '').trim();
+  const normalizedInput = baseInput || `Design this ${roomType} in ${style} style`;
+
+  return `${normalizedInput},
+interior design, same room layout inspiration,
+same perspective, same layout inspiration,
+inspired by the uploaded room photo composition,
+keep core room geometry believable,
+${style} furniture, aesthetic lighting,
+clean arrangement, ${mood} atmosphere,
+budget aware design under ${budget},
+do not return the original unedited room photo,
+show a visibly redesigned interior concept,
+ultra realistic, high detail, 4k, professional photography`;
+}
+
+function normalizeTransformationStrength(value) {
+  const normalized = String(value || 'medium').toLowerCase();
+  if (normalized === 'low' || normalized === 'high') return normalized;
+  return 'medium';
+}
+
+function getTransformationConfig(strength) {
+  const normalized = normalizeTransformationStrength(strength);
+
+  if (normalized === 'low') {
+    return {
+      strength: 'low',
+      guidanceScale: 6.8,
+      inferenceSteps: 28,
+      instruction: 'Keep most room elements, apply light styling and decor changes.'
+    };
   }
 
-  return replicateClient;
+  if (normalized === 'high') {
+    return {
+      strength: 'high',
+      guidanceScale: 10.5,
+      inferenceSteps: 55,
+      instruction: 'Strong redesign: replace furniture style, colors, textures, and lighting while preserving room geometry.'
+    };
+  }
+
+  return {
+    strength: 'medium',
+    guidanceScale: 8.2,
+    inferenceSteps: 38,
+    instruction: 'Balanced redesign with clear visual changes and realistic composition.'
+  };
+}
+
+function buildPollinationsImageUrl(prompt) {
+  const seed = Date.now();
+  const key = process.env.POLLINATIONS_API_KEY;
+  const keyQuery = key ? `&key=${encodeURIComponent(key)}` : '';
+  return `${POLLINATIONS_BASE}/${encodeURIComponent(prompt)}?seed=${seed}&nologo=true&private=true${keyQuery}`;
+}
+
+async function generatePollinationsImage(prompt) {
+  const condensedPrompt = String(prompt || '').replace(/\s+/g, ' ').trim();
+  const sourceUrl = buildPollinationsImageUrl(condensedPrompt);
+
+  const response = await axios.get(sourceUrl, {
+    responseType: 'arraybuffer',
+    timeout: 180000,
+    maxRedirects: 5,
+    validateStatus: () => true,
+    headers: {
+      Accept: 'image/*'
+    }
+  });
+
+  const contentType = String(response.headers['content-type'] || '').toLowerCase();
+
+  if (response.status >= 200 && response.status < 300 && contentType.startsWith('image/')) {
+    const mimeType = contentType.includes('jpeg') ? 'image/jpeg' : contentType.includes('webp') ? 'image/webp' : 'image/png';
+    return {
+      outputImage: bufferToDataUri(response.data, mimeType),
+      sourceUrl,
+      contentType: mimeType
+    };
+  }
+
+  const payload = parseJsonBuffer(response.data);
+  const detail = payload?.error?.message || payload?.error || payload?.message || `Pollinations request failed with status ${response.status}`;
+  throw new Error(detail);
+}
+
+async function generateBestAvailableImage({ inputImage, prompt, style, mood, model, preferImageToImage = false, transformationStrength = 'medium' }) {
+  const hasHuggingFace = !!(process.env.HUGGINGFACE_API_KEY || process.env.HF_TOKEN);
+  const sourceImageComparable = inputImage ? toModelImageInput(inputImage) : null;
+
+  // If we have a source image, prefer img2img first to keep room structure while changing design.
+  if (preferImageToImage && inputImage && hasHuggingFace) {
+    try {
+      const hfPrimary = await generateWithHuggingFace({ inputImage, prompt, style, mood, model, transformationStrength });
+      if (areImagesExactlySame(hfPrimary.outputImage, sourceImageComparable)) {
+        throw new Error('Generated output matched input image exactly; retrying with alternate provider');
+      }
+      return {
+        outputImage: hfPrimary.outputImage,
+        sourceUrl: null,
+        provider: 'huggingface',
+        model: hfPrimary.model
+      };
+    } catch (hfPrimaryError) {
+      console.warn('Primary image-to-image generation failed, falling back:', hfPrimaryError.message);
+    }
+  }
+
+  try {
+    const pollinations = await generatePollinationsImage(prompt);
+    return {
+      outputImage: pollinations.outputImage,
+      sourceUrl: pollinations.sourceUrl,
+      provider: 'pollinations',
+      model: 'pollinations-free'
+    };
+  } catch (pollinationsError) {
+    if (!hasHuggingFace) {
+      throw new Error(`Image generation failed: ${pollinationsError.message}`);
+    }
+
+    const hf = await generateWithHuggingFace({ inputImage, prompt, style, mood, model, transformationStrength });
+    if (areImagesExactlySame(hf.outputImage, sourceImageComparable)) {
+      throw new Error('Generated output matched input image exactly; try a stronger redesign prompt');
+    }
+    return {
+      outputImage: hf.outputImage,
+      sourceUrl: null,
+      provider: 'huggingface-fallback',
+      model: hf.model
+    };
+  }
+}
+
+function getHuggingFaceModel(model) {
+  return model || process.env.HUGGINGFACE_MODEL || process.env.HF_IMAGE_MODEL || DEFAULT_HUGGINGFACE_MODEL;
+}
+
+function getPreferredProvider(provider) {
+  if (provider) {
+    const normalized = provider.toLowerCase();
+    if (normalized === 'replicate') {
+      return 'huggingface';
+    }
+    return normalized;
+  }
+
+  if (process.env.IMAGE_PROVIDER) {
+    return process.env.IMAGE_PROVIDER.toLowerCase();
+  }
+
+  if (process.env.HUGGINGFACE_API_KEY || process.env.HF_TOKEN) {
+    return 'huggingface';
+  }
+
+  return 'mock';
+}
+
+function parseJsonBuffer(buffer) {
+  try {
+    const text = Buffer.isBuffer(buffer) ? buffer.toString('utf-8') : String(buffer || '');
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+function bufferToDataUri(buffer, mimeType = 'image/png') {
+  return `data:${mimeType};base64,${Buffer.from(buffer).toString('base64')}`;
+}
+
+function getRetrySecondsFromHfResponse(responseBody, fallback = 8) {
+  if (!responseBody || typeof responseBody !== 'object') {
+    return fallback;
+  }
+
+  const estimated = Number(responseBody.estimated_time);
+  if (Number.isFinite(estimated) && estimated > 0) {
+    return Math.ceil(estimated) + 1;
+  }
+
+  return fallback;
 }
 
 function persistUploadedFile(file) {
@@ -62,89 +251,41 @@ function persistUploadedFile(file) {
   return imageData;
 }
 
-function normalizeReplicateOutput(output) {
-  if (!output) {
-    return null;
-  }
+function recoverImageById(imageId) {
+  if (!imageId) return null;
 
-  if (typeof output === 'string') {
-    return output;
-  }
+  const cached = uploadedImages.get(imageId);
+  if (cached) return cached;
 
-  if (output instanceof URL) {
-    return output.toString();
-  }
+  if (!fs.existsSync(uploadDir)) return null;
 
-  if (Array.isArray(output)) {
-    for (const item of output) {
-      const normalized = normalizeReplicateOutput(item);
-      if (normalized) {
-        return normalized;
-      }
-    }
-    return null;
-  }
+  const filename = fs.readdirSync(uploadDir).find((name) => name.startsWith(`${imageId}.`));
+  if (!filename) return null;
 
-  if (typeof output === 'object') {
-    if (typeof output.url === 'string') {
-      return output.url;
-    }
+  const filepath = path.join(uploadDir, filename);
+  const stats = fs.statSync(filepath);
+  const recovered = {
+    id: imageId,
+    filename,
+    filepath,
+    url: `/api/images/uploads/${filename}`,
+    originalName: filename,
+    uploadedAt: stats.birthtime?.toISOString?.() || new Date().toISOString(),
+    size: stats.size
+  };
 
-    if (typeof output.url === 'function') {
-      const result = output.url();
-      if (typeof result === 'string') {
-        return result;
-      }
-    }
-
-    if (typeof output.toString === 'function') {
-      const asString = output.toString();
-      if (typeof asString === 'string' && asString !== '[object Object]') {
-        return asString;
-      }
-    }
-  }
-
-  return null;
+  uploadedImages.set(imageId, recovered);
+  return recovered;
 }
 
-function getRetryAfterSeconds(error) {
-  const message = error?.message || '';
-  const explicitRetry = message.match(/retry_after\":(\d+)/i);
-  if (explicitRetry && explicitRetry[1]) {
-    return Number(explicitRetry[1]);
-  }
-
-  const textRetry = message.match(/resets in ~?(\d+)s/i);
-  if (textRetry && textRetry[1]) {
-    return Number(textRetry[1]);
-  }
-
-  return 5;
-}
-
-function isRateLimitError(error) {
-  const message = error?.message || '';
-  return message.includes('429') || message.toLowerCase().includes('too many requests');
+function areImagesExactlySame(a, b) {
+  if (!a || !b) return false;
+  const normalize = (value) => String(value || '').replace(/\s+/g, '');
+  return normalize(a) === normalize(b);
 }
 
 async function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function getModelIdentifier(model) {
-  const configuredModel = model || process.env.REPLICATE_MODEL || 'stability-ai/sdxl';
-
-  if (configuredModel.includes(':')) {
-    return configuredModel;
-  }
-
-  const configuredVersion = process.env.REPLICATE_MODEL_VERSION || DEFAULT_SDXL_VERSION;
-  if (configuredModel === 'stability-ai/sdxl' && configuredVersion) {
-    return `${configuredModel}:${configuredVersion}`;
-  }
-
-  return configuredModel;
 }
 
 function getErrorStatusCode(error) {
@@ -159,14 +300,39 @@ function getErrorStatusCode(error) {
   return 500;
 }
 
-function isReplicateTemporarilyUnavailable(error) {
+function isProviderTemporarilyUnavailable(error) {
   const message = (error?.message || '').toLowerCase();
   return (
     message.includes('insufficient credit') ||
     message.includes('payment required') ||
     message.includes('too many requests') ||
-    message.includes('rate limit')
+    message.includes('rate limit') ||
+    message.includes('currently loading') ||
+    message.includes('model is loading') ||
+    message.includes('503')
   );
+}
+
+function getProviderFallbackMessage(error) {
+  const message = (error?.message || '').toLowerCase();
+
+  if (message.includes('insufficient credit') || message.includes('payment required') || message.includes('402')) {
+    return 'Hugging Face billing/quota is insufficient. Please update your Hugging Face plan/quota and retry.';
+  }
+
+  if (message.includes('too many requests') || message.includes('rate limit') || message.includes('429')) {
+    return 'Hugging Face is rate-limiting requests right now. Please retry after a short wait.';
+  }
+
+  if (message.includes('currently loading') || message.includes('model is loading') || message.includes('503')) {
+    return 'Hugging Face model is loading. Please retry in a minute.';
+  }
+
+  if (message.includes('401') || message.includes('403') || message.includes('unauthorized') || message.includes('forbidden')) {
+    return 'Hugging Face API token is invalid or lacks access for this model.';
+  }
+
+  return 'Hugging Face is temporarily unavailable. Please retry shortly.';
 }
 
 function getImageMimeType(imagePath) {
@@ -177,7 +343,7 @@ function getImageMimeType(imagePath) {
   return 'image/jpeg';
 }
 
-function toReplicateImageInput(inputImage) {
+function toModelImageInput(inputImage) {
   if (!inputImage) {
     throw new Error('Missing input image for generation');
   }
@@ -195,72 +361,70 @@ function toReplicateImageInput(inputImage) {
   return inputImage;
 }
 
-async function generateWithReplicate({ inputImage, prompt, style, mood, model }) {
-  const client = getReplicateClient();
-  const replicateImage = toReplicateImageInput(inputImage);
-  const preferredModel = getModelIdentifier(model);
-  const fallbackModel = getModelIdentifier('stability-ai/sdxl');
+async function generateWithHuggingFace({ inputImage, prompt, style, mood, model, transformationStrength = 'medium' }) {
+  const token = getHuggingFaceToken();
+  const modelName = getHuggingFaceModel(model);
+  const endpoint = `${HUGGINGFACE_API_BASE}/${modelName}`;
+  const strengthConfig = getTransformationConfig(transformationStrength);
 
-  const attempts = [
-    {
-      model: preferredModel,
-      input: {
-        image: replicateImage,
-        prompt,
-        prompt_strength: 0.8,
-        output_format: 'jpg'
+  const refinedPrompt = `${prompt}\n\nInterior style: ${style || 'modern'}. Mood: ${mood || 'cozy'}. Transformation strength: ${strengthConfig.strength}. ${strengthConfig.instruction} Ultra realistic interior render, detailed lighting, high quality.`;
+  const sourceImage = inputImage ? toModelImageInput(inputImage) : undefined;
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const response = await axios.post(
+      endpoint,
+      {
+        inputs: refinedPrompt,
+        parameters: {
+          guidance_scale: strengthConfig.guidanceScale,
+          num_inference_steps: strengthConfig.inferenceSteps,
+          negative_prompt: 'blurry, low quality, distorted, watermark, text artifacts'
+        },
+        options: {
+          wait_for_model: true,
+          use_cache: false
+        },
+        source_image: typeof sourceImage === 'string' && sourceImage.startsWith('data:') ? sourceImage : undefined
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: 'image/png',
+          'Content-Type': 'application/json'
+        },
+        responseType: 'arraybuffer',
+        validateStatus: () => true,
+        timeout: 180000
       }
-    },
-    {
-      model: preferredModel,
-      input: {
-        input_image: replicateImage,
-        prompt,
-        strength: 0.8,
-        output_format: 'jpg'
-      }
-    },
-    {
-      model: fallbackModel,
-      input: {
-        image: replicateImage,
-        prompt: `${prompt}\n\nInterior style: ${style || 'modern'}. Mood: ${mood || 'cozy'}.`,
-        prompt_strength: 0.8,
-        output_format: 'jpg'
-      }
+    );
+
+    const contentType = String(response.headers['content-type'] || '').toLowerCase();
+
+    if (response.status >= 200 && response.status < 300 && contentType.includes('image/')) {
+      return {
+        outputImage: bufferToDataUri(response.data, contentType.includes('jpeg') ? 'image/jpeg' : 'image/png'),
+        model: modelName
+      };
     }
-  ];
 
-  let lastError = null;
+    const jsonBody = parseJsonBuffer(response.data);
+    const detail = jsonBody?.error || jsonBody?.detail || `Hugging Face request failed with status ${response.status}`;
 
-  for (const attempt of attempts) {
-    for (let retry = 0; retry < 3; retry += 1) {
-      try {
-        const output = await client.run(attempt.model, { input: attempt.input });
-        const outputUrl = normalizeReplicateOutput(output);
-
-        if (!outputUrl) {
-          throw new Error('Replicate returned no usable output URL');
-        }
-
-        return {
-          outputImage: outputUrl,
-          model: attempt.model
-        };
-      } catch (error) {
-        lastError = error;
-
-        if (!isRateLimitError(error) || retry === 2) {
-          break;
-        }
-
-        const retryAfterSeconds = getRetryAfterSeconds(error);
-        await wait((retryAfterSeconds + 1) * 1000);
-      }
+    if (response.status === 503 && attempt < 2) {
+      const waitSeconds = getRetrySecondsFromHfResponse(jsonBody, 12);
+      await wait(waitSeconds * 1000);
+      continue;
     }
+
+    if (response.status === 429 && attempt < 2) {
+      await wait(8000);
+      continue;
+    }
+
+    throw new Error(`Hugging Face generation failed (${response.status}): ${detail}`);
   }
 
-  throw new Error(`Replicate generation failed after fallback attempts: ${lastError?.message || 'unknown error'}`);
+  throw new Error('Hugging Face model is still loading. Please retry in a minute.');
 }
 
 function resolveImageSource({ imageId, imageUrl, file }) {
@@ -275,22 +439,48 @@ function resolveImageSource({ imageId, imageUrl, file }) {
   }
 
   if (imageId) {
-    const imageData = uploadedImages.get(imageId);
-    if (!imageData) {
-      throw new Error(`Image not found: ${imageId}`);
+    const imageData = recoverImageById(imageId);
+    if (imageData) {
+      return {
+        imageId: imageData.id,
+        inputImageUrl: imageData.url,
+        modelInputImage: imageData.filepath,
+        imageData
+      };
     }
 
-    return {
-      imageId: imageData.id,
-      inputImageUrl: imageData.url,
-      modelInputImage: imageData.filepath,
-      imageData
-    };
+    // If the image id is stale (e.g. after restart), fall back to imageUrl if provided.
+    if (!imageUrl) {
+      throw new Error(`Image not found: ${imageId}`);
+    }
   }
 
   if (imageUrl) {
+    const uploadFilenameMatch = String(imageUrl).match(/\/images\/uploads\/([^/?#]+)/i);
+    if (uploadFilenameMatch?.[1]) {
+      const filename = uploadFilenameMatch[1];
+      const filepath = path.join(uploadDir, filename);
+
+      if (fs.existsSync(filepath)) {
+        return {
+          imageId: imageId || filename.replace(path.extname(filename), ''),
+          inputImageUrl: `/api/images/uploads/${filename}`,
+          modelInputImage: filepath,
+          imageData: {
+            id: imageId || filename.replace(path.extname(filename), ''),
+            filename,
+            filepath,
+            url: `/api/images/uploads/${filename}`,
+            originalName: filename,
+            uploadedAt: new Date().toISOString(),
+            size: fs.statSync(filepath).size
+          }
+        };
+      }
+    }
+
     return {
-      imageId: uuidv4(),
+      imageId: imageId || uuidv4(),
       inputImageUrl: imageUrl,
       modelInputImage: imageUrl,
       imageData: null
@@ -342,7 +532,7 @@ Output:
 - visually appealing redesigned room matching user inputs`;
 }
 
-function createMockGeneratedImage(designData) {
+function createMockGeneratedImage(designData, fallbackMessage = 'Hugging Face is temporarily unavailable. Please retry shortly.') {
   const {
     roomType = 'room',
     style = 'modern',
@@ -366,7 +556,7 @@ function createMockGeneratedImage(designData) {
   <text x="100" y="305" fill="#cbd5e1" font-size="34" font-family="Arial, sans-serif">Style: ${String(style)}</text>
   <text x="100" y="360" fill="#cbd5e1" font-size="34" font-family="Arial, sans-serif">Mood: ${String(mood)}</text>
   <text x="100" y="415" fill="#cbd5e1" font-size="34" font-family="Arial, sans-serif">Budget: ${String(budget)}</text>
-  <text x="100" y="520" fill="#93c5fd" font-size="24" font-family="Arial, sans-serif">Set REPLICATE_API_TOKEN or OPENAI_API_KEY for real image-to-image redesign output.</text>
+  <text x="100" y="520" fill="#93c5fd" font-size="24" font-family="Arial, sans-serif">${String(fallbackMessage)}</text>
   <text x="100" y="565" fill="#94a3b8" font-size="20" font-family="Arial, sans-serif">Generated at: ${timestamp}</text>
 </svg>`;
 
@@ -412,9 +602,10 @@ export const generateRoomDesign = async (req, res) => {
       roomType,
       style,
       mood,
-      provider = 'replicate',
+      provider,
       prompt: customPrompt,
-      model
+      model,
+      transformationStrength = 'medium'
     } = req.body;
 
     if (!roomType || !style) {
@@ -425,33 +616,24 @@ export const generateRoomDesign = async (req, res) => {
     }
 
     const source = resolveImageSource({ imageId, imageUrl, file: null });
-    const prompt = customPrompt || buildTransformationPrompt(req.body);
-
-    let generation;
-    let generationProvider = provider;
-
-    if (provider === 'mock') {
-      generation = {
-        outputImage: createMockGeneratedImage(req.body),
-        model: 'mock-renderer'
-      };
-    } else {
-      generation = await generateWithReplicate({
-        inputImage: source.modelInputImage,
-        prompt,
-        style,
-        mood,
-        model
-      });
-      generationProvider = 'replicate';
-    }
+    const prompt = customPrompt || buildPollinationsPrompt(`Design my ${roomType} in ${style} style`, req.body);
+    const generation = await generateBestAvailableImage({
+      inputImage: source.modelInputImage,
+      prompt,
+      style,
+      mood,
+      model,
+      transformationStrength
+    });
 
     const result = {
       success: true,
       imageId: source.imageId,
       inputImage: source.inputImageUrl,
       outputImage: generation.outputImage,
-      provider: generationProvider,
+      image: generation.outputImage,
+      pollinationsUrl: generation.sourceUrl,
+      provider: generation.provider,
       model: generation.model,
       generatedAt: new Date().toISOString(),
       generationTime: null,
@@ -470,22 +652,6 @@ export const generateRoomDesign = async (req, res) => {
     return res.status(200).json(result);
   } catch (error) {
     console.error('Generation error:', error);
-
-    if (isReplicateTemporarilyUnavailable(error)) {
-      const fallbackImage = createMockGeneratedImage(req.body);
-      return res.status(200).json({
-        success: true,
-        imageId: req.body?.imageId || null,
-        inputImage: null,
-        outputImage: fallbackImage,
-        provider: 'mock-fallback',
-        model: 'mock-renderer',
-        generatedAt: new Date().toISOString(),
-        designData: req.body,
-        prompt: req.body?.prompt || buildTransformationPrompt(req.body),
-        warning: 'Replicate is temporarily unavailable (billing/rate-limit). Showing fallback preview.'
-      });
-    }
 
     return res.status(getErrorStatusCode(error)).json({
       success: false,
@@ -508,43 +674,35 @@ export const generateRoomImage = async (req, res) => {
       roomType = 'living room',
       prompt: customPrompt,
       model,
-      provider = 'replicate'
+      provider,
+      transformationStrength = 'medium'
     } = req.body;
 
     const source = resolveImageSource({ imageId, imageUrl, file: req.file });
 
-    const prompt = customPrompt || buildTransformationPrompt({
+    const prompt = customPrompt || buildPollinationsPrompt(`Design my ${roomType} in ${style} style`, {
       roomType,
       style,
       mood,
       ...req.body
     });
-
-    let generation;
-    let generationProvider = provider;
-
-    if (provider === 'mock') {
-      generation = {
-        outputImage: createMockGeneratedImage({ roomType, style, mood, ...req.body }),
-        model: 'mock-renderer'
-      };
-    } else {
-      generation = await generateWithReplicate({
-        inputImage: source.modelInputImage,
-        prompt,
-        style,
-        mood,
-        model
-      });
-      generationProvider = 'replicate';
-    }
+    const generation = await generateBestAvailableImage({
+      inputImage: source.modelInputImage,
+      prompt,
+      style,
+      mood,
+      model,
+      transformationStrength
+    });
 
     const result = {
       success: true,
       imageId: source.imageId,
       inputImage: source.inputImageUrl,
       outputImage: generation.outputImage,
-      provider: generationProvider,
+      image: generation.outputImage,
+      pollinationsUrl: generation.sourceUrl,
+      provider: generation.provider,
       model: generation.model,
       prompt,
       generatedAt: new Date().toISOString(),
@@ -568,21 +726,6 @@ export const generateRoomImage = async (req, res) => {
   } catch (error) {
     console.error('Generate image error:', error);
 
-    if (isReplicateTemporarilyUnavailable(error)) {
-      const fallbackImage = createMockGeneratedImage(req.body);
-      return res.status(200).json({
-        success: true,
-        imageId: req.body?.imageId || null,
-        inputImage: req.body?.imageUrl || null,
-        outputImage: fallbackImage,
-        provider: 'mock-fallback',
-        model: 'mock-renderer',
-        generatedAt: new Date().toISOString(),
-        designData: req.body,
-        warning: 'Replicate is temporarily unavailable (billing/rate-limit). Showing fallback preview.'
-      });
-    }
-
     return res.status(getErrorStatusCode(error)).json({
       success: false,
       error: error.message
@@ -600,27 +743,27 @@ export const generateImageFromCloudinary = async (req, res) => {
     const style = req.query.style || 'modern boho';
     const mood = req.query.mood || 'warm';
 
-    const prompt = `
-Redesign this room into a ${style} style ${roomType}.
-Make it aesthetic, realistic, well-lit, clean layout.
-Add furniture, decor, plants, and warm lighting.
-Optimize for space and comfort.
-Ultra realistic, interior design, 4k quality, professional photography.
-`.trim();
-
-    const generation = await generateWithReplicate({
+    const prompt = buildPollinationsPrompt(`Design this ${roomType} in ${style} style`, {
+      roomType,
+      style,
+      mood,
+      imageUrl: DEFAULT_CLOUDINARY_IMAGE_URL
+    });
+    const generation = await generateBestAvailableImage({
       inputImage: DEFAULT_CLOUDINARY_IMAGE_URL,
       prompt,
       style,
       mood,
-      model: getModelIdentifier(process.env.REPLICATE_MODEL || 'stability-ai/sdxl')
+      model: null,
+      transformationStrength: req.query.transformationStrength || 'medium'
     });
 
     return res.status(200).json({
       success: true,
       image: generation.outputImage,
       outputImage: generation.outputImage,
-      provider: 'replicate',
+      pollinationsUrl: generation.sourceUrl,
+      provider: generation.provider,
       model: generation.model,
       inputImage: DEFAULT_CLOUDINARY_IMAGE_URL,
       prompt,
@@ -629,23 +772,93 @@ Ultra realistic, interior design, 4k quality, professional photography.
   } catch (error) {
     console.error('Cloudinary generate image error:', error);
 
-    if (isReplicateTemporarilyUnavailable(error)) {
-      const fallbackImage = createMockGeneratedImage({ roomType: 'bedroom', style: 'modern boho', mood: 'warm' });
-      return res.status(200).json({
-        success: true,
-        image: fallbackImage,
-        outputImage: fallbackImage,
-        provider: 'mock-fallback',
-        model: 'mock-renderer',
-        inputImage: DEFAULT_CLOUDINARY_IMAGE_URL,
-        warning: 'Replicate is temporarily unavailable (billing/rate-limit). Showing fallback preview.',
-        generatedAt: new Date().toISOString()
-      });
-    }
-
     return res.status(getErrorStatusCode(error)).json({
       success: false,
       error: error.message || 'Image generation failed'
+    });
+  }
+};
+
+/**
+ * Generate image from prompt using Pollinations
+ * Endpoint target: POST /api/generate-image
+ */
+export const generateImage = async (req, res) => {
+  try {
+    const {
+      prompt,
+      userInput,
+      roomType,
+      style,
+      mood,
+      budget,
+      imageId,
+      imageUrl,
+      model,
+      transformationStrength = 'medium'
+    } = req.body || {};
+
+    let source = null;
+    if (imageId || imageUrl || req.file) {
+      source = resolveImageSource({ imageId, imageUrl, file: req.file || null });
+    }
+
+    const hasSourceImage = !!source?.modelInputImage;
+    const strengthConfig = getTransformationConfig(transformationStrength);
+
+    const basePrompt = buildPollinationsPrompt(prompt || userInput, {
+      roomType,
+      style,
+      mood,
+      budget
+    });
+
+    const transformationPrompt = hasSourceImage
+      ? `${buildTransformationPrompt({ roomType, style, mood, budget })}\n\nUser intent: ${String(prompt || userInput || 'Create a fresh redesign concept')}\n\nTransformation strength: ${strengthConfig.strength}. ${strengthConfig.instruction}\n\nImportant: preserve room geometry but clearly replace colors, materials, furniture style, lighting mood, and decor so the output is visibly different from the input photo.`
+      : basePrompt;
+
+    const generation = await generateBestAvailableImage({
+      inputImage: source?.modelInputImage || null,
+      prompt: transformationPrompt,
+      style,
+      mood,
+      model: model || null,
+      preferImageToImage: hasSourceImage,
+      transformationStrength: strengthConfig.strength
+    });
+
+    return res.status(200).json({
+      success: true,
+      image: generation.outputImage,
+      outputImage: generation.outputImage,
+      imageId: source?.imageId || null,
+      inputImage: source?.inputImageUrl || null,
+      pollinationsUrl: generation.sourceUrl,
+      provider: generation.provider,
+      model: generation.model,
+      transformationStrength: strengthConfig.strength,
+      prompt: transformationPrompt
+    });
+  } catch (error) {
+    console.error('Pollinations generate image error:', error);
+
+    const fallbackPrompt = String(req.body?.prompt || req.body?.userInput || 'Create a redesigned hostel room concept');
+    const fallbackImage = createMockGeneratedImage(
+      {
+        roomType: req.body?.roomType || 'hostel room',
+        style: req.body?.style || 'modern',
+        mood: req.body?.mood || 'cozy',
+        budget: req.body?.budget || 'low'
+      },
+      'Live AI provider unavailable, generated fallback concept shown.'
+    );
+
+    return res.status(200).json({
+      success: true,
+      image: fallbackImage,
+      outputImage: fallbackImage,
+      provider: 'mock-fallback',
+      prompt: fallbackPrompt
     });
   }
 };
@@ -694,29 +907,25 @@ export const getImage = (req, res) => {
  * Get provider status
  */
 export const getProviderStatus = async (req, res) => {
-  const replicateConfigured = !!process.env.REPLICATE_API_TOKEN;
+  const activeProvider = 'pollinations';
 
   return res.status(200).json({
     success: true,
     providers: {
-      replicate: {
-        provider: 'REPLICATE_PROVIDER',
-        configured: replicateConfigured,
-        model: getModelIdentifier(process.env.REPLICATE_MODEL || 'stability-ai/sdxl'),
-        description: 'Real image-to-image generation using Replicate'
-      },
-      mock: {
-        provider: 'MOCK_PROVIDER',
+      pollinations: {
+        provider: 'POLLINATIONS_PROVIDER',
         configured: true,
-        description: 'Mock fallback provider for development'
+        model: 'pollinations-free',
+        description: 'Image generation using Pollinations API (no key required)'
       }
     },
-    activeProvider: replicateConfigured ? 'replicate' : 'mock'
+    activeProvider
   });
 };
 
 export default {
   uploadRoomImage,
+  generateImage,
   generateRoomDesign,
   generateRoomImage,
   generateImageFromCloudinary,

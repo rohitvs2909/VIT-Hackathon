@@ -16,21 +16,32 @@ function SavedPage() {
       try {
         const response = await projectsAPI.getAll();
         if (response.data.success) {
-          setProjects(response.data.data);
+          const apiProjects = Array.isArray(response.data.data) ? response.data.data : [];
+          const localProjects = useProjectsStore.getState().projects || [];
+
+          const merged = [...apiProjects];
+          localProjects.forEach((localProject) => {
+            const exists = merged.some(
+              (apiProject) =>
+                apiProject.id === localProject.id ||
+                (apiProject.afterImage && localProject.afterImage && apiProject.afterImage === localProject.afterImage)
+            );
+
+            if (!exists) {
+              merged.push(localProject);
+            }
+          });
+
+          setProjects(merged);
         }
       } catch (error) {
         console.error('Failed to load projects:', error);
-        // Use mock data from localStorage if available
-        const savedProjects = localStorage.getItem('spacecraft-projects');
-        if (savedProjects) {
-          setProjects(JSON.parse(savedProjects));
-        }
       } finally {
         setLoading(false);
       }
     };
     loadProjects();
-  }, []);
+  }, [setProjects]);
 
   const handleLoadProject = (project) => {
     if (project.plan) {
@@ -44,12 +55,13 @@ function SavedPage() {
 
   const handleDeleteProject = async (projectId) => {
     if (window.confirm('Are you sure you want to delete this project?')) {
+      deleteProject(projectId);
+
       try {
         await projectsAPI.delete(projectId);
-        deleteProject(projectId);
         toast.success('Project deleted');
       } catch (error) {
-        toast.error('Failed to delete project');
+        toast.success('Project removed locally');
       }
     }
   };

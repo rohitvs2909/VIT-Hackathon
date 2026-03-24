@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#dfe7f1"/>
+      <stop offset="100%" stop-color="#bfcad8"/>
+    </linearGradient>
+  </defs>
+  <rect width="1280" height="720" fill="url(#bg)"/>
+  <rect x="70" y="70" width="1140" height="580" rx="28" fill="#f7fafe" opacity="0.92"/>
+  <text x="120" y="170" font-size="52" font-family="Arial" fill="#32455a" font-weight="700">Modern Living Room Concept</text>
+  <text x="120" y="235" font-size="30" font-family="Arial" fill="#4b6078">Neutral palette, balanced symmetry, cleaner circulation</text>
+  <rect x="120" y="360" width="410" height="170" rx="18" fill="#8da0b6"/>
+  <rect x="560" y="390" width="170" height="120" rx="16" fill="#60738a"/>
+  <rect x="770" y="320" width="320" height="220" rx="20" fill="#d5dde7"/>
+  <rect x="810" y="350" width="240" height="150" rx="14" fill="#9fb1c6"/>
+</svg>

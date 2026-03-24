@@ -104,7 +104,7 @@ export default function RedesignPage() {
         budget,
         priority,
         isStudentMode,
-        provider: 'replicate'
+        provider: 'pollinations'
       };
 
       const response = await imageAPI.generateDesign(designData);
@@ -137,7 +137,7 @@ export default function RedesignPage() {
       const response = await imageAPI.generateCloudinaryDesign();
       if (response.data?.success && response.data?.image) {
         setCloudinaryGeneratedImage(response.data.image);
-        toast.success('Cloudinary image redesigned with Replicate');
+        toast.success('Cloudinary image redesigned with Hugging Face');
       } else {
         throw new Error(response.data?.error || 'Generation failed');
       }
@@ -338,7 +338,7 @@ export default function RedesignPage() {
 
         <aside className="col-span-12 xl:col-span-4 space-y-4">
           <div className="rounded-3xl border border-white/40 bg-white/75 backdrop-blur-xl shadow-soft p-5">
-            <p className="text-xs uppercase tracking-wider text-slate-500">Live Replicate Demo</p>
+            <p className="text-xs uppercase tracking-wider text-slate-500">Live Hugging Face Demo</p>
             <h3 className="text-lg font-semibold text-slate-900 mt-2">Generate From Cloudinary</h3>
             <p className="mt-2 text-sm text-slate-600">Run real image-to-image generation with your Cloudinary public room image.</p>
 
@@ -354,7 +354,7 @@ export default function RedesignPage() {
             {cloudinaryGeneratedImage && (
               <img
                 src={cloudinaryGeneratedImage}
-                alt="Replicate generated room"
+                alt="Hugging Face generated room"
                 className="mt-4 rounded-2xl shadow-xl w-full"
               />
             )}

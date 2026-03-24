@@ -32,9 +32,13 @@ export const imageAPI = {
   generateDesign: (designData) =>
     apiClient.post('/images/generate', designData, { timeout: AI_GENERATION_TIMEOUT }),
 
-  // Generate from fixed cloudinary URL via backend Replicate flow
+  // Generate AI redesign directly from user prompt (chatbot flow)
+  generateFromPrompt: (payload) =>
+    apiClient.post('/generate-image', payload, { timeout: AI_GENERATION_TIMEOUT }),
+
+  // Generate from fixed cloudinary URL via backend Hugging Face flow
   generateCloudinaryDesign: () =>
-    apiClient.get('/generate-image', { timeout: AI_GENERATION_TIMEOUT }),
+    apiClient.get('/images/generate-image', { timeout: AI_GENERATION_TIMEOUT }),
 
   // Regenerate with different parameters
   regenerateDesign: (imageId, designData) =>

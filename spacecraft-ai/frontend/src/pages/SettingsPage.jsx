@@ -1,6 +1,8 @@
 import React from 'react';
+import { useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { Bell, Palette, Shield, Sparkles } from 'lucide-react';
+import { logout } from '../utils/auth';
 
 const settingsItems = [
   {
@@ -21,6 +23,13 @@ const settingsItems = [
 ];
 
 export default function SettingsPage() {
+  const navigate = useNavigate();
+
+  const handleLogout = () => {
+    logout();
+    navigate('/login');
+  };
+
   return (
     <div className="space-y-6">
       <div>
@@ -54,6 +63,18 @@ export default function SettingsPage() {
           <Sparkles size={18} />
           <p className="font-medium">Premium SaaS UI mode is active.</p>
         </div>
+      </div>
+
+      <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5">
+        <h3 className="text-lg font-semibold text-slate-900">Account</h3>
+        <p className="mt-1 text-sm text-slate-600">Logout from this device session.</p>
+        <button
+          type="button"
+          onClick={handleLogout}
+          className="mt-3 rounded-xl bg-rose-600 px-4 py-2 text-sm font-medium text-white hover:bg-rose-700"
+        >
+          Logout
+        </button>
       </div>
     </div>
   );

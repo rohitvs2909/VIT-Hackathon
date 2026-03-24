@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { BrowserRouter as Router, Routes, Route, Link, Outlet, useLocation } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, Link, Outlet, useLocation, Navigate } from 'react-router-dom';
 import { Toaster } from 'react-hot-toast';
 import { motion } from 'framer-motion';
 import { LayoutDashboard, WandSparkles, GalleryHorizontalEnd, Bookmark, Settings, Menu, X } from 'lucide-react';
@@ -11,10 +11,30 @@ import ResultsPage from './pages/ResultsPage';
 import SavedPage from './pages/SavedPage';
 import AboutPage from './pages/AboutPage';
 import SettingsPage from './pages/SettingsPage';
+import LoginPage from './pages/LoginPage';
+import ChatbotPanel from './components/chat/ChatbotPanel';
+import { getCurrentUser, isAuthenticated } from './utils/auth';
+
+function ProtectedRoute() {
+  if (!isAuthenticated()) {
+    return <Navigate to="/login" replace />;
+  }
+
+  return <Outlet />;
+}
+
+function PublicOnlyRoute() {
+  if (isAuthenticated()) {
+    return <Navigate to="/" replace />;
+  }
+
+  return <Outlet />;
+}
 
 function DashboardLayout() {
   const location = useLocation();
   const [collapsed, setCollapsed] = useState(false);
+  const currentUser = getCurrentUser();
 
   const navItems = useMemo(
     () => [
@@ -88,7 +108,7 @@ function DashboardLayout() {
                 Breadcrumb: Home / {activeItem?.label || 'Dashboard'}
               </div>
               <div className="rounded-full border border-white/30 bg-white/70 px-3 py-2 text-xs font-medium text-slate-700">
-                Rohit • Active
+                {(currentUser?.username || 'User')} • Active
               </div>
             </div>
           </header>
@@ -127,15 +147,24 @@ function App() {
   return (
     <Router>
       <Routes>
-        <Route element={<DashboardLayout />}>
-          <Route path="/" element={<LandingPage />} />
-          <Route path="/design" element={<RedesignPage />} />
-          <Route path="/results" element={<ResultsPage />} />
-          <Route path="/saved" element={<SavedPage />} />
-          <Route path="/about" element={<AboutPage />} />
-          <Route path="/settings" element={<SettingsPage />} />
+        <Route element={<PublicOnlyRoute />}>
+          <Route path="/login" element={<LoginPage />} />
         </Route>
+
+        <Route element={<ProtectedRoute />}>
+          <Route element={<DashboardLayout />}>
+            <Route path="/" element={<LandingPage />} />
+            <Route path="/design" element={<RedesignPage />} />
+            <Route path="/results" element={<ResultsPage />} />
+            <Route path="/saved" element={<SavedPage />} />
+            <Route path="/about" element={<AboutPage />} />
+            <Route path="/settings" element={<SettingsPage />} />
+          </Route>
+        </Route>
+
+        <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
+      {isAuthenticated() && <ChatbotPanel />}
       <Toaster position="top-right" />
     </Router>
   );

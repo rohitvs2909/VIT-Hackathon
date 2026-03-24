@@ -7,6 +7,7 @@ import express from 'express';
 import upload from '../middleware/uploadMiddleware.js';
 import {
 	uploadRoomImage,
+	generateImage,
 	generateRoomDesign,
 	generateRoomImage,
 	generateImageFromCloudinary,
@@ -49,6 +50,7 @@ router.post('/generate', generateRoomDesign);
  */
 router.post('/generate-image', upload.single('roomImage'), generateRoomImage);
 router.get('/generate-image', generateImageFromCloudinary);
+router.post('/prompt-generate', generateImage);
 
 /**
  * POST /api/images/regenerate

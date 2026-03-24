@@ -1,11 +1,14 @@
-import React, { useState, useRef } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import toast from 'react-hot-toast';
 import { useDesignStore, useProjectsStore } from '../store/designStore';
 import { projectsAPI, imageAPI } from '../utils/api';
-import { AlertTriangle, Download, Lightbulb, PaintBucket, RotateCcw, Send, Sofa, Sparkles, SunMedium, Palette } from 'lucide-react';
+import { AlertTriangle, Box, Camera, Download, Lightbulb, PaintBucket, RotateCcw, Send, Sofa, Sparkles, SunMedium, Palette } from 'lucide-react';
 import { PieChart, Pie, Cell, RadialBarChart, RadialBar, ResponsiveContainer } from 'recharts';
+import BeforeAfterComparison from '../components/results/BeforeAfterComparison';
+import View3DModal from '../components/results/View3DModal';
+import LiveCameraModal from '../components/results/LiveCameraModal';
 
 /**
  * ResultsPage - NEW IMAGE-BASED RESULTS
@@ -16,10 +19,12 @@ function ResultsPage() {
   const [saving, setSaving] = useState(false);
   const [projectName, setProjectName] = useState('');
   const [showSaveModal, setShowSaveModal] = useState(false);
-  const [sliderValue, setSliderValue] = useState(50);
   const [isRegenerating, setIsRegenerating] = useState(false);
   const [activeTab, setActiveTab] = useState('colors');
-  const sliderRef = useRef(null);
+  const [isApplyingCustomization, setIsApplyingCustomization] = useState(false);
+  const [lastAppliedRefinement, setLastAppliedRefinement] = useState('');
+  const [show3D, setShow3D] = useState(false);
+  const [showCamera, setShowCamera] = useState(false);
 
   const {
     uploadedImage,
@@ -34,7 +39,51 @@ function ResultsPage() {
     reset
   } = useDesignStore();
 
-  const { addProject } = useProjectsStore();
+  const { addProject, projects } = useProjectsStore();
+
+  useEffect(() => {
+    if (!generatedDesign?.outputImage || !uploadedImage?.url) return;
+
+    const alreadySaved = projects.some(
+      (project) => project.afterImage && project.afterImage === generatedDesign.outputImage
+    );
+
+    if (alreadySaved) return;
+
+    const autoProject = {
+      id: `auto-${Date.now()}`,
+      name: `${style} ${roomType} Auto Save`,
+      description: `${style} ${roomType} design - ${budget} budget`,
+      beforeImage: uploadedImage.url,
+      afterImage: generatedDesign.outputImage,
+      designData: {
+        roomType,
+        style,
+        mood,
+        budget,
+        priority,
+        isStudentMode
+      },
+      prompt: generatedDesign.prompt,
+      provider: generatedDesign.provider,
+      generationTime: generatedDesign.generationTime || null,
+      createdAt: generatedDesign.generatedAt || new Date().toISOString(),
+      source: 'auto-save'
+    };
+
+    addProject(autoProject);
+  }, [
+    generatedDesign,
+    uploadedImage,
+    roomType,
+    style,
+    mood,
+    budget,
+    priority,
+    isStudentMode,
+    addProject,
+    projects
+  ]);
 
   // Redirect if no generated design
   if (!generatedDesign || !uploadedImage) {
@@ -130,7 +179,6 @@ function ResultsPage() {
         setGeneratedDesign(response.data);
         toast.dismiss(toastId);
         toast.success('✨ Design regenerated!');
-        setSliderValue(50);
       }
     } catch (error) {
       toast.error('Failed to regenerate design');
@@ -170,6 +218,64 @@ function ResultsPage() {
     { id: 'decor', label: 'Decor', icon: PaintBucket }
   ];
 
+  const customizationOptions = {
+    colors: ['Warm beige palette', 'Cool neutral palette', 'High-contrast accent wall'],
+    furniture: ['Minimal furniture layout', 'Space-saving modular furniture', 'Premium statement furniture'],
+    lighting: ['Soft ambient lighting', 'Layered task + ambient lights', 'Bright daylight-balanced lighting'],
+    decor: ['Add indoor plants', 'Add textured rugs and cushions', 'Add wall art and mirror accents']
+  };
+
+  const handleApplyCustomization = async (refinementText) => {
+    try {
+      setIsApplyingCustomization(true);
+      const toastId = toast.loading(`Applying ${activeTab} refinement...`);
+
+      const refinementPrompt = [
+        generatedDesign?.prompt || `Redesign this ${roomType}`,
+        `Apply refinement focus: ${activeTab}`,
+        `Specific change: ${refinementText}`,
+        'Ensure this refinement is clearly visible while preserving the same room geometry.'
+      ].join('\n');
+
+      const response = await imageAPI.generateFromPrompt({
+        prompt: refinementPrompt,
+        userInput: `Refine ${activeTab}: ${refinementText}`,
+        roomType,
+        style,
+        mood,
+        budget,
+        imageId: generatedDesign?.imageId || uploadedImage?.id,
+        imageUrl: uploadedImage?.url,
+        transformationStrength: 'high'
+      });
+
+      if (response.data?.success && response.data?.image) {
+        setGeneratedDesign({
+          ...generatedDesign,
+          imageId: response.data.imageId || generatedDesign?.imageId || uploadedImage?.id,
+          inputImage: uploadedImage?.url,
+          outputImage: response.data.image,
+          image: response.data.image,
+          provider: response.data.provider || generatedDesign?.provider,
+          model: response.data.model || generatedDesign?.model,
+          prompt: response.data.prompt || refinementPrompt,
+          generatedAt: new Date().toISOString()
+        });
+
+        setLastAppliedRefinement(refinementText);
+        toast.dismiss(toastId);
+        toast.success('Customization applied to generated image');
+      } else {
+        toast.dismiss(toastId);
+        toast.error('Could not apply customization right now');
+      }
+    } catch (error) {
+      toast.error('Failed to apply customization');
+    } finally {
+      setIsApplyingCustomization(false);
+    }
+  };
+
   return (
     <div className="space-y-5">
       <motion.div initial={{ opacity: 0, y: -16 }} animate={{ opacity: 1, y: 0 }} className="flex flex-wrap items-end justify-between gap-3">
@@ -178,6 +284,8 @@ function ResultsPage() {
           <p className="text-slate-600 mt-1">Premium AI redesign output for your {style} {roomType}</p>
         </div>
         <div className="flex flex-wrap gap-2">
+          <button onClick={() => setShowCamera(true)} className="btn-secondary inline-flex items-center gap-2"><Camera size={16} /> Open Live Camera</button>
+          <button onClick={() => setShow3D(true)} className="btn-secondary inline-flex items-center gap-2"><Box size={16} /> View in 3D</button>
           <button onClick={handleDownloadImage} className="btn-primary inline-flex items-center gap-2"><Download size={16} /> Download</button>
           <button onClick={() => setShowSaveModal(true)} className="btn-secondary inline-flex items-center gap-2"><Send size={16} /> Save</button>
           <button onClick={handleRegenerate} disabled={isRegenerating} className="btn-secondary inline-flex items-center gap-2 disabled:opacity-50"><RotateCcw size={16} /> {isRegenerating ? 'Regenerating...' : 'Regenerate'}</button>
@@ -186,27 +294,13 @@ function ResultsPage() {
 
       <div className="grid grid-cols-12 gap-4">
         <div className="col-span-12 xl:col-span-8 space-y-4">
+          {/* Premium Before/After Comparison Slider */}
           <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} className="rounded-3xl border border-white/40 bg-white/80 backdrop-blur-xl shadow-soft overflow-hidden">
-            <div className="relative w-full aspect-video bg-slate-200 overflow-hidden">
-              <img src={uploadedImage.url} alt="Before" className="w-full h-full object-cover" />
-
-              <div ref={sliderRef} className="absolute inset-0 overflow-hidden" style={{ width: `${sliderValue}%` }}>
-                <img src={generatedDesign.outputImage} alt="After" className="w-screen h-full object-cover" style={{ marginLeft: `-${100 - sliderValue}%` }} />
-              </div>
-
-              <input
-                type="range"
-                min="0"
-                max="100"
-                value={sliderValue}
-                onChange={(e) => setSliderValue(Number(e.target.value))}
-                className="absolute inset-0 w-full h-full opacity-0 cursor-col-resize z-30"
+            <div className="p-0">
+              <BeforeAfterComparison 
+                beforeImage={uploadedImage?.url} 
+                afterImage={generatedDesign?.outputImage} 
               />
-
-              <div className="absolute top-0 bottom-0 w-[2px] bg-white shadow-lg z-20" style={{ left: `${sliderValue}%` }} />
-              <div className="absolute top-3 left-3 rounded-lg bg-black/55 text-white px-3 py-1 text-xs font-medium">Before</div>
-              <div className="absolute top-3 right-3 rounded-lg bg-black/55 text-white px-3 py-1 text-xs font-medium">After</div>
-              <div className="absolute bottom-3 left-1/2 -translate-x-1/2 rounded-lg bg-black/65 text-white px-3 py-1 text-xs">Drag to compare</div>
             </div>
           </motion.div>
 
@@ -284,8 +378,31 @@ function ResultsPage() {
               })}
             </div>
             <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-600">
-              Live update preview mode for <span className="font-semibold text-slate-900">{activeTab}</span>. Tap options to simulate refinements.
+              Apply real <span className="font-semibold text-slate-900">{activeTab}</span> refinements to regenerate the output image.
             </div>
+
+            <div className="mt-3 grid grid-cols-1 gap-2">
+              {(customizationOptions[activeTab] || []).map((option) => (
+                <button
+                  key={option}
+                  type="button"
+                  disabled={isApplyingCustomization}
+                  onClick={() => handleApplyCustomization(option)}
+                  className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-left text-sm text-slate-700 hover:border-indigo-300 hover:bg-indigo-50 disabled:opacity-60 disabled:cursor-not-allowed transition-all"
+                >
+                  {option}
+                </button>
+              ))}
+            </div>
+
+            <div className="mt-3 rounded-xl border border-indigo-100 bg-indigo-50 px-3 py-2 text-xs text-indigo-700">
+              {isApplyingCustomization
+                ? `Applying ${activeTab} changes to generated image...`
+                : lastAppliedRefinement
+                  ? `Last applied: ${lastAppliedRefinement}`
+                  : 'Select an option to update the generated image.'}
+            </div>
+
             <button
               onClick={() => {
                 reset();
@@ -298,6 +415,17 @@ function ResultsPage() {
           </motion.div>
         </aside>
       </div>
+
+      <View3DModal
+        open={show3D}
+        onClose={() => setShow3D(false)}
+        image={generatedDesign?.outputImage}
+      />
+
+      <LiveCameraModal
+        open={showCamera}
+        onClose={() => setShowCamera(false)}
+      />
 
         {/* Save Modal */}
         {showSaveModal && (

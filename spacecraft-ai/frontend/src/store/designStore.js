@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { persist } from 'zustand/middleware';
 
 // Design wizard store - NEW IMAGE-BASED WORKFLOW
 export const useDesignStore = create((set) => ({
@@ -115,21 +116,51 @@ export const useDesignStore = create((set) => ({
 }));
 
 // Projects store
-export const useProjectsStore = create((set) => ({
-  projects: [],
-  setProjects: (projects) => set({ projects }),
-  addProject: (project) => set((state) => ({
-    projects: [...state.projects, project],
-  })),
-  updateProject: (id, updates) => set((state) => ({
-    projects: state.projects.map((p) =>
-      p.id === id ? { ...p, ...updates } : p
-    ),
-  })),
-  deleteProject: (id) => set((state) => ({
-    projects: state.projects.filter((p) => p.id !== id),
-  })),
-}));
+export const useProjectsStore = create(
+  persist(
+    (set) => ({
+      projects: [],
+      setProjects: (projects) => set({ projects }),
+      addProject: (project) =>
+        set((state) => {
+          const duplicate = state.projects.some(
+            (p) =>
+              p.id === project.id ||
+              (p.afterImage && project.afterImage && p.afterImage === project.afterImage)
+          );
+
+          if (duplicate) {
+            return {
+              projects: state.projects.map((p) =>
+                p.id === project.id ||
+                (p.afterImage && project.afterImage && p.afterImage === project.afterImage)
+                  ? { ...p, ...project }
+                  : p
+              )
+            };
+          }
+
+          return {
+            projects: [project, ...state.projects]
+          };
+        }),
+      updateProject: (id, updates) =>
+        set((state) => ({
+          projects: state.projects.map((p) =>
+            p.id === id ? { ...p, ...updates } : p
+          )
+        })),
+      deleteProject: (id) =>
+        set((state) => ({
+          projects: state.projects.filter((p) => p.id !== id)
+        }))
+    }),
+    {
+      name: 'spacecraft-projects-store',
+      partialize: (state) => ({ projects: state.projects })
+    }
+  )
+);
 
 // UI Store
 export const useUIStore = create((set) => ({
